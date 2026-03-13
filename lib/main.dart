@@ -1,41 +1,99 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:async';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:signature/signature.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:permission_handler/permission_handler.dart';
 
-void main() {
-  runApp(const SmartNoteApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Khởi tạo Firebase cho cả web và mobile
+  bool firebaseReady = false;
+  try {
+    // Khởi tạo Firebase với options
+    await Firebase.initializeApp(
+      options: const FirebaseOptions(
+        apiKey: "AIzaSyD3aUAHCLA71s69sjw3FyZdSyJQ5Q1lQYg",
+        authDomain: "ptud-42561.firebaseapp.com",
+        projectId: "ptud-42561",
+        storageBucket: "ptud-42561.firebasestorage.app",
+        messagingSenderId: "346353106055",
+        appId: "1:346353106055:web:4079ae21b3f4badbbe0c22",
+      ),
+    );
+    firebaseReady = true;
+    print('✅ Firebase kết nối thành công!');
+  } catch (e) {
+    print('❌ Lỗi Firebase: $e');
+    firebaseReady = false;
+  }
+  
+  runApp(SmartNoteApp(firebaseReady: firebaseReady));
 }
 
 class SmartNoteApp extends StatelessWidget {
-  const SmartNoteApp({super.key});
+  final bool firebaseReady;
+  const SmartNoteApp({super.key, required this.firebaseReady});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Smart Note',
       theme: ThemeData(
+        primarySwatch: Colors.purple,
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF673AB7),
-          primary: const Color(0xFF673AB7),
-          secondary: const Color(0xFFFFC107),
-        ),
-        scaffoldBackgroundColor: const Color(0xFFF5F5F7),
       ),
-      home: const HomeScreen(),
+      home: firebaseReady
+          ? StreamBuilder<User?>(
+              stream: FirebaseAuth.instance.authStateChanges(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Scaffold(
+                    body: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                return snapshot.data != null ? const HomeScreen() : const LoginScreen();
+              },
+            )
+          : const Scaffold(
+              body: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 20),
+                    Text('Đang khởi tạo Firebase...'),
+                  ],
+                ),
+              ),
+            ),
       debugShowCheckedModeBanner: false,
     );
   }
 }
 
+// --- MODEL GHI CHÚ ---
 class Note {
   String id;
   String title;
   String content;
   DateTime modifiedTime;
   int colorIndex;
+  String? userId;
+  List<String> attachments;
 
   Note({
     required this.id,
@@ -43,6 +101,8 @@ class Note {
     required this.content,
     required this.modifiedTime,
     this.colorIndex = 0,
+    this.userId,
+    this.attachments = const [],
   });
 
   Map<String, dynamic> toJson() => {
@@ -51,27 +111,485 @@ class Note {
         'content': content,
         'modifiedTime': modifiedTime.toIso8601String(),
         'colorIndex': colorIndex,
+        'userId': userId,
+        'attachments': attachments,
       };
 
-  factory Note.fromJson(Map<String, dynamic> json) => Note(
-        id: json['id'],
-        title: json['title'],
-        content: json['content'],
-        modifiedTime: DateTime.parse(json['modifiedTime']),
-        colorIndex: json['colorIndex'] ?? 0,
-      );
+  Map<String, dynamic> toFirestore() => {
+        'title': title,
+        'content': content,
+        'modifiedTime': Timestamp.fromDate(modifiedTime),
+        'colorIndex': colorIndex,
+        'userId': userId,
+        'attachments': attachments,
+      };
+
+  factory Note.fromJson(Map<String, dynamic> json) {
+    final dynamic raw = json['attachments'];
+    List<String> atts;
+    if (raw == null) {
+      atts = <String>[];
+    } else if (raw is List) {
+      atts = raw.map((e) => e.toString()).toList();
+    } else if (raw is String) {
+      // Một số dữ liệu cũ có thể lưu attachments dưới dạng chuỗi
+      // (vd: "[]" hoặc một path đơn)
+      final s = raw.trim();
+      if (s.isEmpty || s == '[]') {
+        atts = <String>[];
+      } else {
+        atts = <String>[s];
+      }
+    } else {
+      atts = <String>[];
+    }
+
+    return Note(
+      id: (json['id'] ?? '') as String,
+      title: (json['title'] ?? '') as String,
+      content: (json['content'] ?? '') as String,
+      modifiedTime: DateTime.tryParse((json['modifiedTime'] ?? '').toString()) ?? DateTime.now(),
+      colorIndex: (json['colorIndex'] ?? 0) as int,
+      userId: json['userId']?.toString(),
+      attachments: atts,
+    );
+  }
+
+  factory Note.fromFirestore(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data() ?? {};
+    final ts = data['modifiedTime'];
+    DateTime mt;
+    if (ts is Timestamp) {
+      mt = ts.toDate();
+    } else if (ts is String) {
+      mt = DateTime.tryParse(ts) ?? DateTime.now();
+    } else {
+      mt = DateTime.now();
+    }
+
+    return Note(
+      id: doc.id,
+      title: (data['title'] ?? '') as String,
+      content: (data['content'] ?? '') as String,
+      modifiedTime: mt,
+      colorIndex: (data['colorIndex'] ?? 0) as int,
+      userId: data['userId'] as String?,
+      attachments: List<String>.from(data['attachments'] ?? const []),
+    );
+  }
 }
 
 final List<Color> noteColors = [
   Colors.white,
-  const Color(0xFFFFF9C4), // Yellow
-  const Color(0xFFFFCCBC), // Orange
-  const Color(0xFFC8E6C9), // Green
-  const Color(0xFFB3E5FC), // Blue
-  const Color(0xFFF8BBD0), // Pink
-  const Color(0xFFE1BEE7), // Purple
+  const Color(0xFFFFF9C4),
+  const Color(0xFFFFCCBC),
+  const Color(0xFFC8E6C9),
+  const Color(0xFFB3E5FC),
+  const Color(0xFFF8BBD0),
+  const Color(0xFFE1BEE7),
 ];
 
+// --- MÀN HÌNH ĐĂNG NHẬP ---
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final TextEditingController _userController = TextEditingController();
+  final TextEditingController _passController = TextEditingController();
+  String _error = '';
+  bool _loading = false;
+  String? _lastUsername;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLastLogin();
+  }
+
+  Future<void> _loadLastLogin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? lastUser = prefs.getString('lastUsername');
+    if (lastUser != null) {
+      setState(() {
+        _lastUsername = lastUser;
+        _userController.text = lastUser;
+      });
+      print('👤 Đã tải username lần cuối: $lastUser');
+    }
+  }
+
+  Future<void> _signInWithGoogle() async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+
+    try {
+      // Chỉ cho phép Google Sign-In trên web
+      if (!kIsWeb) {
+        setState(() {
+          _error = 'Google Sign-In chỉ khả dụng trên web';
+          _loading = false;
+        });
+        return;
+      }
+
+      // Kiểm tra Firebase đã được khởi tạo chưa
+      try {
+        FirebaseAuth.instance.app;
+        print('✅ Firebase đã sẵn sàng');
+      } catch (e) {
+        print('❌ Firebase chưa được khởi tạo: $e');
+        setState(() {
+          _error = 'Firebase chưa được khởi tạo. Vui lòng refresh trang!';
+          _loading = false;
+        });
+        return;
+      }
+
+      print('🔍 Bắt đầu Google Sign-In với Firebase Auth...');
+      
+      // Dùng Firebase Auth trực tiếp với popup
+      final GoogleAuthProvider googleProvider = GoogleAuthProvider();
+      googleProvider.addScope('email');
+      
+      final UserCredential userCredential = await FirebaseAuth.instance.signInWithPopup(googleProvider);
+      final User? user = userCredential.user;
+
+      if (user != null) {
+        // Lưu email lần cuối để tự điền
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('lastUsername', user.email ?? user.displayName ?? 'Google User');
+        
+        print('✅ Đăng nhập Google thành công: ${user.email}');
+        
+        if (mounted) {
+          Navigator.popUntil(context, (route) => route.isFirst);
+        }
+      }
+    } catch (e) {
+      print('❌ Lỗi Google Sign-In: $e');
+      String errorMessage = 'Lỗi đăng nhập Google';
+      
+      // Xử lý các lỗi phổ biến
+      if (e.toString().contains('invalid_client') || e.toString().contains('401')) {
+        errorMessage = 'Google OAuth Client ID không hợp lệ. Kiểm tra Firebase Console!';
+      } else if (e.toString().contains('redirect_uri_mismatch') || e.toString().contains('400')) {
+        errorMessage = 'Redirect URI không khớp. Chạy với port 8080!';
+      } else if (e.toString().contains('access_denied')) {
+        errorMessage = 'Bạn đã từ chối quyền truy cập Google.';
+      } else if (e.toString().contains('network')) {
+        errorMessage = 'Lỗi kết nối mạng. Vui lòng thử lại!';
+      } else if (e.toString().contains('popup-closed-by-user')) {
+        errorMessage = 'Bạn đã đóng popup đăng nhập.';
+      } else if (e.toString().contains('no-app')) {
+        errorMessage = 'Firebase chưa được khởi tạo. Vui lòng refresh trang!';
+      }
+      
+      setState(() {
+        _error = errorMessage;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _login() async {
+    final email = _userController.text.trim();
+    final pass = _passController.text.trim();
+    if (email.isEmpty || pass.isEmpty) {
+      setState(() => _error = 'Nhập đủ thông tin');
+      return;
+    }
+    
+    setState(() => _loading = true);
+    
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(email: email, password: pass);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('lastUsername', email);
+      if (mounted) Navigator.popUntil(context, (route) => route.isFirst);
+    } catch (e) {
+      setState(() => _error = 'Lỗi: $e');
+    }
+    
+    setState(() => _loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF673AB7), Color(0xFF512DA8)],
+          ),
+        ),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32.0),
+            child: Card(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.note_alt, size: 60, color: Color(0xFF673AB7)),
+                      const SizedBox(height: 16),
+                      const Text('Smart Note', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 20),
+                      
+                      // Quick login với username đã lưu
+                      if (_lastUsername != null && _lastUsername!.isNotEmpty) ...[
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.blue[50],
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.blue[200]!),
+                          ),
+                          child: Column(
+                            children: [
+                              Text(
+                                'Đăng nhập nhanh với:',
+                                style: TextStyle(fontSize: 12, color: Colors.blue[700]),
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      _lastUsername!,
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.blue[700],
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.login, color: Color(0xFF673AB7)),
+                                    onPressed: () {
+                                      _userController.text = _lastUsername!;
+                                      FocusScope.of(context).nextFocus();
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      
+                      TextField(
+                        controller: _userController,
+                        decoration: InputDecoration(
+                          labelText: 'Email',
+                          prefixIcon: const Icon(Icons.person),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _passController,
+                        obscureText: true,
+                        decoration: InputDecoration(
+                          labelText: 'Mật khẩu',
+                          prefixIcon: const Icon(Icons.lock),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                      if (_error.isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        Text(_error, style: const TextStyle(color: Colors.red)),
+                      ],
+                      const SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: ElevatedButton(
+                          onPressed: _loading ? null : _login,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF673AB7),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          child: _loading 
+                            ? const CircularProgressIndicator(color: Colors.white)
+                            : const Text('ĐĂNG NHẬP', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                      
+                      // Google Sign-In button (chỉ trên web)
+                      if (kIsWeb) ...[
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 50,
+                          child: OutlinedButton.icon(
+                            onPressed: _loading ? null : _signInWithGoogle,
+                            icon: const Icon(Icons.account_circle, size: 24),
+                            label: const Text('Đăng nhập với Google'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.black87,
+                              side: const BorderSide(color: Colors.grey),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            ),
+                          ),
+                        ),
+                      ],
+                      
+                      const SizedBox(height: 16),
+                      TextButton(
+                        onPressed: () {
+                          Navigator.push(context, MaterialPageRoute(builder: (context) => const RegisterScreen()));
+                        },
+                        child: const Text('Chưa có tài khoản? Đăng ký ngay'),
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Tài khoản demo: admin/123 hoặc test/123',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// --- MÀN HÌNH ĐĂNG KÝ ---
+class RegisterScreen extends StatefulWidget {
+  const RegisterScreen({super.key});
+
+  @override
+  State<RegisterScreen> createState() => _RegisterScreenState();
+}
+
+class _RegisterScreenState extends State<RegisterScreen> {
+  final TextEditingController _u = TextEditingController();
+  final TextEditingController _p = TextEditingController();
+  final TextEditingController _cp = TextEditingController();
+  String _e = '';
+  bool _loading = false;
+
+  Future<void> _reg() async {
+    if (_u.text.isEmpty || _p.text.isEmpty) {
+      setState(() => _e = 'Nhập đủ thông tin');
+      return;
+    }
+    if (_p.text != _cp.text) {
+      setState(() => _e = 'Mật khẩu không khớp');
+      return;
+    }
+
+    setState(() => _loading = true);
+    
+    try {
+      final email = _u.text.trim();
+      final pass = _p.text;
+      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(email: email, password: pass);
+
+      await FirebaseFirestore.instance.collection('users').doc(cred.user!.uid).set({
+        'email': email,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('lastUsername', email);
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đăng ký thành công!')),
+        );
+        Future.delayed(const Duration(seconds: 1), () {
+          FirebaseAuth.instance.signOut();
+          if (mounted) Navigator.popUntil(context, (route) => route.isFirst);
+        });
+      }
+    } catch (e) {
+      setState(() => _e = 'Lỗi: $e');
+    }
+    
+    setState(() => _loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Đăng ký tài khoản'), backgroundColor: const Color(0xFF673AB7), foregroundColor: Colors.white),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            children: [
+              const SizedBox(height: 20),
+              TextField(
+                controller: _u,
+                decoration: InputDecoration(
+                  labelText: 'Email',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _p,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: 'Mật khẩu',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _cp,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: 'Nhập lại mật khẩu',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+              if (_e.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text(_e, style: const TextStyle(color: Colors.red)),
+              ],
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                  onPressed: _loading ? null : _reg,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF673AB7),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: _loading
+                      ? const CircularProgressIndicator(color: Colors.white)
+                      : const Text('ĐĂNG KÝ', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// --- MÀN HÌNH CHÍNH ---
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -80,231 +598,220 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  List<Note> _allNotes = [];
-  List<Note> _filteredNotes = [];
-  final TextEditingController _searchController = TextEditingController();
-  bool _isLoading = true;
+  List<Note> _all = [], _filtered = [];
+  final TextEditingController _s = TextEditingController();
+  static const String _prefsNotesKey = 'notes';
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _notesSub;
 
   @override
   void initState() {
     super.initState();
     _loadNotes();
-    _searchController.addListener(_onSearchChanged);
+    _startNotesSync();
+    _s.addListener(() {
+      setState(() {
+        _filtered = _all.where((n) => n.title.toLowerCase().contains(_s.text.toLowerCase())).toList();
+      });
+    });
   }
 
-  @override
-  void dispose() {
-    _searchController.dispose();
-    super.dispose();
+  void _startNotesSync() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    _notesSub?.cancel();
+    _notesSub = _db
+        .collection('users')
+        .doc(user.uid)
+        .collection('notes')
+        .orderBy('modifiedTime', descending: true)
+        .snapshots()
+        .listen(
+      (snapshot) async {
+        final notes = snapshot.docs.map((d) => Note.fromFirestore(d)).toList();
+
+        if (!mounted) return;
+        setState(() {
+          _all = notes;
+          _filtered = _all.where((n) => n.title.toLowerCase().contains(_s.text.toLowerCase())).toList();
+        });
+
+        // Sync về local cache để offline fallback
+        try {
+          await _saveNotes();
+        } catch (_) {}
+      },
+      onError: (e) {
+        print('❌ Lỗi sync Firestore notes: $e');
+      },
+    );
   }
 
   Future<void> _loadNotes() async {
     final prefs = await SharedPreferences.getInstance();
-    final String? notesJson = prefs.getString('notes');
-    if (notesJson != null) {
-      final List<dynamic> decoded = jsonDecode(notesJson);
-      setState(() {
-        _allNotes = decoded.map((item) => Note.fromJson(item)).toList();
-        _allNotes.sort((a, b) => b.modifiedTime.compareTo(a.modifiedTime));
-        _filteredNotes = _allNotes;
-        _isLoading = false;
-      });
-    } else {
-      setState(() {
-        _isLoading = false;
-      });
+
+    // Một số bản cũ đã từng lưu key 'notes' dưới dạng String (vd: "[]")
+    // khiến getStringList() bị TypeError trên web. Ta tự migrate/clear trước.
+    List<String> notesJson;
+    try {
+      notesJson = prefs.getStringList(_prefsNotesKey) ?? <String>[];
+    } catch (e) {
+      final dynamic raw = prefs.get(_prefsNotesKey);
+      print('⚠️ Dữ liệu notes bị sai kiểu: ${raw.runtimeType} - $raw');
+      await prefs.remove(_prefsNotesKey);
+      notesJson = <String>[];
     }
+
+    setState(() {
+      _all = notesJson.map((e) => Note.fromJson(jsonDecode(e))).toList();
+      _all.sort((a, b) => b.modifiedTime.compareTo(a.modifiedTime));
+      _filtered = _all.where((n) => n.title.toLowerCase().contains(_s.text.toLowerCase())).toList();
+    });
   }
 
   Future<void> _saveNotes() async {
     final prefs = await SharedPreferences.getInstance();
-    final String encoded = jsonEncode(_allNotes.map((n) => n.toJson()).toList());
-    await prefs.setString('notes', encoded);
+    final notesJson = _all.map((note) => jsonEncode(note.toJson())).toList();
+    await prefs.setStringList(_prefsNotesKey, notesJson);
   }
 
-  void _onSearchChanged() {
-    final query = _searchController.text.toLowerCase();
-    setState(() {
-      _filteredNotes = _allNotes
-          .where((note) => note.title.toLowerCase().contains(query))
-          .toList();
-    });
+  @override
+  void dispose() {
+    _notesSub?.cancel();
+    _s.dispose();
+    super.dispose();
   }
 
-  void _deleteNote(int index) async {
-    final noteToDelete = _filteredNotes[index];
-    final bool? confirm = await showDialog<bool>(
+  Future<void> _logout() async {
+    await FirebaseAuth.instance.signOut();
+  }
+
+  Future<void> _del(int i) async {
+    final note = _filtered[i];
+    final bool? ok = await showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Xác nhận xóa'),
-        content: const Text('Bạn có chắc chắn muốn xóa ghi chú này không?'),
+      builder: (c) => AlertDialog(
+        title: const Text('Xác nhận'),
+        content: const Text('Xóa ghi chú này?'),
         actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Hủy')),
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Hủy', style: TextStyle(color: Colors.grey)),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Xóa'),
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Xóa', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
     );
+    
+    if (ok == true) {
+      try {
+        print('🗑️ Đang xóa ghi chú: ${note.id}');
 
-    if (confirm == true) {
-      setState(() {
-        _allNotes.removeWhere((n) => n.id == noteToDelete.id);
-        _onSearchChanged();
-      });
-      await _saveNotes();
+        // Optimistic UI
+        setState(() {
+          _all.removeWhere((n) => n.id == note.id);
+          _filtered = _all.where((n) => n.title.toLowerCase().contains(_s.text.toLowerCase())).toList();
+        });
+
+        // Local cache update
+        await _saveNotes();
+
+        final user = FirebaseAuth.instance.currentUser;
+        if (user != null) {
+          await _db.collection('users').doc(user.uid).collection('notes').doc(note.id).delete();
+        }
+
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã xóa ghi chú thành công')),
+        );
+      } catch (e) {
+        print('❌ Lỗi xóa ghi chú: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lỗi xóa: $e')),
+        );
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Smart Note - [Nguyễn Văn Quang] - [2351160542]',
-          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
-        ),
-        centerTitle: true,
         backgroundColor: const Color(0xFF673AB7),
-        elevation: 4,
-        shadowColor: Colors.black26,
+        title: Text('Smart Note - ${user?.email ?? ''}', style: const TextStyle(color: Colors.white, fontSize: 16)),
+        actions: [
+          IconButton(icon: const Icon(Icons.logout, color: Colors.white), onPressed: _logout),
+        ],
       ),
-      body: Column(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(16.0),
-            decoration: const BoxDecoration(
-              color: Color(0xFF673AB7),
-              borderRadius: BorderRadius.only(
-                bottomLeft: Radius.circular(30),
-                bottomRight: Radius.circular(30),
-              ),
-            ),
-            child: TextField(
-              controller: _searchController,
-              style: const TextStyle(color: Colors.black87),
-              decoration: InputDecoration(
-                hintText: 'Tìm kiếm ghi chú...',
-                prefixIcon: const Icon(Icons.search, color: Color(0xFF673AB7)),
-                filled: true,
-                fillColor: Colors.white,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(30),
-                  borderSide: BorderSide.none,
+      body: user == null
+          ? const Center(child: Text('Bạn chưa đăng nhập'))
+          : Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: TextField(
+                    controller: _s,
+                    decoration: InputDecoration(
+                      hintText: 'Tìm kiếm...',
+                      prefixIcon: const Icon(Icons.search),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                    ),
+                  ),
                 ),
-                contentPadding: const EdgeInsets.symmetric(vertical: 0),
-              ),
-            ),
-          ),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _allNotes.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Opacity(
-                              opacity: 0.5,
-                              child: Image.network(
-                                'https://cdn-icons-png.flaticon.com/512/4076/4076549.png',
-                                width: 150,
-                                errorBuilder: (context, error, stackTrace) => 
-                                    const Icon(Icons.note_alt_outlined, size: 100, color: Colors.grey),
-                              ),
-                            ),
-                            const SizedBox(height: 20),
-                            Text(
-                              'Bạn chưa có ghi chú nào, hãy tạo mới nhé!',
-                              style: TextStyle(
-                                color: Colors.grey[600],
-                                fontSize: 16,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    : MasonryGridView.count(
-                        padding: const EdgeInsets.all(16),
-                        crossAxisCount: 2,
-                        mainAxisSpacing: 16,
-                        crossAxisSpacing: 16,
-                        itemCount: _filteredNotes.length,
-                        itemBuilder: (context, index) {
-                          final note = _filteredNotes[index];
-                          return Dismissible(
-                            key: Key(note.id),
-                            direction: DismissDirection.horizontal,
-                            background: _buildDismissBg(Alignment.centerLeft),
-                            secondaryBackground: _buildDismissBg(Alignment.centerRight),
-                            confirmDismiss: (direction) async {
-                              _deleteNote(index);
+                Expanded(
+                  child: _filtered.isEmpty
+                      ? const Center(child: Text('Bạn chưa có ghi chú nào!'))
+                      : MasonryGridView.count(
+                          padding: const EdgeInsets.all(16),
+                          crossAxisCount: 2,
+                          mainAxisSpacing: 16,
+                          crossAxisSpacing: 16,
+                          itemCount: _filtered.length,
+                          itemBuilder: (c, i) => Dismissible(
+                            key: Key(_filtered[i].id),
+                            direction: DismissDirection.endToStart,
+                            background: Container(color: Colors.red, child: const Icon(Icons.delete, color: Colors.white)),
+                            confirmDismiss: (d) async {
+                              await _del(i);
                               return false;
                             },
                             child: NoteCard(
-                              note: note,
+                              note: _filtered[i],
                               onTap: () async {
                                 await Navigator.push(
                                   context,
-                                  MaterialPageRoute(
-                                    builder: (context) => NoteDetailScreen(note: note),
-                                  ),
+                                  MaterialPageRoute(builder: (c) => NoteDetailScreen(note: _filtered[i])),
                                 );
-                                _loadNotes();
+                                // Nếu Firestore sync lỗi thì vẫn load từ cache
+                                await _loadNotes();
                               },
                             ),
-                          );
-                        },
-                      ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
+                          ),
+                        ),
+                ),
+              ],
+            ),
+      floatingActionButton: FloatingActionButton(
         onPressed: () async {
           await Navigator.push(
             context,
-            MaterialPageRoute(
-              builder: (context) => const NoteDetailScreen(),
-            ),
+            MaterialPageRoute(builder: (c) => const NoteDetailScreen()),
           );
-          _loadNotes();
+          await _loadNotes();
         },
-        label: const Text('Thêm mới', style: TextStyle(fontWeight: FontWeight.bold)),
-        icon: const Icon(Icons.add),
-        backgroundColor: const Color(0xFFFFC107),
-        foregroundColor: Colors.black87,
+        child: const Icon(Icons.add),
       ),
-    );
-  }
-
-  Widget _buildDismissBg(Alignment alignment) {
-    return Container(
-      alignment: alignment,
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      decoration: BoxDecoration(
-        color: Colors.redAccent,
-        borderRadius: BorderRadius.circular(15),
-      ),
-      child: const Icon(Icons.delete_sweep, color: Colors.white, size: 30),
     );
   }
 }
 
+// --- WIDGET THẺ GHI CHÚ ---
 class NoteCard extends StatelessWidget {
   final Note note;
   final VoidCallback onTap;
-
   const NoteCard({super.key, required this.note, required this.onTap});
 
   @override
@@ -315,65 +822,105 @@ class NoteCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: noteColors[note.colorIndex],
           borderRadius: BorderRadius.circular(15),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
-            ),
-          ],
-          border: Border.all(color: Colors.black.withOpacity(0.05)),
+          boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)],
         ),
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                note.title.isEmpty ? '(Không có tiêu đề)' : note.title,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 17,
-                  color: Colors.black87,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Hiển thị ảnh đính kèm nếu có
+            if (note.attachments.isNotEmpty)
+              ClipRRect(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
+                child: _buildFirstAttachmentPreview(),
               ),
-              const SizedBox(height: 10),
-              Text(
-                note.content.isEmpty ? 'Không có nội dung' : note.content,
-                style: TextStyle(
-                  color: Colors.black54,
-                  fontSize: 14,
-                  height: 1.4,
-                ),
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 15),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.access_time, size: 12, color: Colors.grey[400]),
-                  const SizedBox(width: 4),
                   Text(
-                    DateFormat('dd/MM HH:mm').format(note.modifiedTime),
-                    style: TextStyle(
-                      color: Colors.grey[500],
-                      fontSize: 10,
-                      fontWeight: FontWeight.w500,
+                    note.title.isEmpty ? '(Không tiêu đề)' : note.title,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    note.content,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.black54),
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.bottomRight,
+                    child: Text(
+                      DateFormat('dd/MM HH:mm').format(note.modifiedTime),
+                      style: const TextStyle(fontSize: 10, color: Colors.grey),
                     ),
                   ),
                 ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
+
+  Widget _buildFirstAttachmentPreview() {
+    String path = note.attachments.first;
+    
+    // Kiểm tra nếu là base64 image (web)
+    if (path.startsWith('data:image/')) {
+      return Image.network(
+        path,
+        height: 100,
+        width: double.infinity,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          print('❌ Lỗi hiển thị base64 image: $error');
+          return Container(
+            height: 100,
+            color: Colors.grey[200],
+            child: const Center(child: Icon(Icons.broken_image, color: Colors.grey)),
+          );
+        },
+      );
+    }
+    // Kiểm tra nếu là base64 file khác (web)
+    else if (path.startsWith('data:application/')) {
+      return Container(
+        height: 40,
+        color: Colors.black12,
+        child: const Center(child: Icon(Icons.attach_file, size: 20)),
+      );
+    }
+    // Kiểm tra nếu là file ảnh local
+    else if (path.endsWith('.jpg') || path.endsWith('.png') || path.endsWith('.jpeg')) {
+      return Image.file(
+        File(path),
+        height: 100,
+        width: double.infinity,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          print('❌ Lỗi hiển thị ảnh local: $error');
+          return Container(
+            height: 100,
+            color: Colors.grey[200],
+            child: const Center(child: Icon(Icons.broken_image, color: Colors.grey)),
+          );
+        },
+      );
+    }
+    // File khác
+    return Container(
+      height: 40,
+      color: Colors.black12,
+      child: const Center(child: Icon(Icons.attach_file, size: 20)),
+    );
+  }
 }
 
+// --- MÀN HÌNH CHI TIẾT / SOẠN THẢO ---
 class NoteDetailScreen extends StatefulWidget {
   final Note? note;
   const NoteDetailScreen({super.key, this.note});
@@ -383,211 +930,445 @@ class NoteDetailScreen extends StatefulWidget {
 }
 
 class _NoteDetailScreenState extends State<NoteDetailScreen> {
-  late TextEditingController _titleController;
-  late TextEditingController _contentController;
+  late TextEditingController _t, _c;
   late String _id;
-  late int _selectedColorIndex;
-  bool _isAutoSaving = false;
+  int _color = 0;
+  List<String> _files = [];
+  bool _loading = false;
 
   @override
   void initState() {
     super.initState();
     _id = widget.note?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
-    _titleController = TextEditingController(text: widget.note?.title ?? '');
-    _contentController = TextEditingController(text: widget.note?.content ?? '');
-    _selectedColorIndex = widget.note?.colorIndex ?? 0;
+    _t = TextEditingController(text: widget.note?.title ?? '');
+    _c = TextEditingController(text: widget.note?.content ?? '');
+    _color = widget.note?.colorIndex ?? 0;
+    _files = List.from(widget.note?.attachments ?? []);
   }
 
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _contentController.dispose();
-    super.dispose();
+  Future<void> _requestPermission() async {
+    if (Platform.isAndroid) {
+      await [
+        Permission.storage,
+        Permission.camera,
+        Permission.photos,
+      ].request();
+    }
   }
 
-  Future<void> _saveAndExit() async {
-    if (_isAutoSaving) return;
-    _isAutoSaving = true;
-
-    final title = _titleController.text.trim();
-    final content = _contentController.text.trim();
-
-    if (title.isEmpty && content.isEmpty && widget.note == null) {
-      Navigator.pop(context);
-      return;
+  Future<void> _pickImg() async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+      if (image != null) {
+        String filePath;
+        
+        if (kIsWeb) {
+          // Trên web, đọc bytes và convert sang base64
+          final bytes = await image.readAsBytes();
+          final base64String = base64Encode(bytes);
+          final extension = p.extension(image.name);
+          filePath = 'data:image/$extension;base64,$base64String';
+          print('✅ Ảnh đã lưu (web): base64 encoded');
+        } else {
+          // Trên mobile/desktop, lưu vào file system
+          final dir = await getApplicationDocumentsDirectory();
+          final fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
+          final savedImage = await File(image.path).copy('${dir.path}/$fileName');
+          filePath = savedImage.path;
+          print('✅ Ảnh đã lưu (local): $filePath');
+        }
+        
+        setState(() => _files.add(filePath));
+      }
+    } catch (e) {
+      print('❌ Lỗi chọn ảnh: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Lỗi chọn ảnh: $e')),
+      );
     }
+  }
 
-    final prefs = await SharedPreferences.getInstance();
-    final String? notesJson = prefs.getString('notes');
-    List<Note> allNotes = [];
-    if (notesJson != null) {
-      final List<dynamic> decoded = jsonDecode(notesJson);
-      allNotes = decoded.map((item) => Note.fromJson(item)).toList();
+  Future<void> _pickFile() async {
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        allowMultiple: false,
+      );
+      
+      if (result != null && result.files.single.bytes != null) {
+        String filePath;
+        
+        if (kIsWeb) {
+          // Trên web, dùng bytes và convert sang base64
+          final bytes = result.files.single.bytes!;
+          final base64String = base64Encode(bytes);
+          final fileName = result.files.single.name;
+          final extension = p.extension(fileName);
+          
+          // Kiểm tra nếu là ảnh
+          if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].contains(extension.toLowerCase())) {
+            filePath = 'data:image/$extension;base64,$base64String';
+          } else {
+            // Đối với file khác, lưu dưới dạng data URL
+            filePath = 'data:application/$extension;base64,$base64String';
+          }
+          print('✅ File đã lưu (web): $fileName - base64 encoded');
+        } else {
+          // Trên mobile/desktop, lưu vào file system
+          if (result.files.single.path != null) {
+            final dir = await getApplicationDocumentsDirectory();
+            final file = File(result.files.single.path!);
+            final fileName = p.basename(file.path);
+            final savedFile = await file.copy('${dir.path}/$fileName');
+            filePath = savedFile.path;
+            print('✅ File đã lưu (local): $filePath');
+          } else {
+            throw Exception('Không thể truy cập file path');
+          }
+        }
+        
+        setState(() => _files.add(filePath));
+      }
+    } catch (e) {
+      print('❌ Lỗi chọn file: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Lỗi chọn file: $e')),
+      );
     }
+  }
 
-    final updatedNote = Note(
-      id: _id,
-      title: title,
-      content: content,
-      modifiedTime: DateTime.now(),
-      colorIndex: _selectedColorIndex,
+  void _draw() async {
+    final SignatureController controller = SignatureController(
+      penStrokeWidth: 5,
+      penColor: Colors.black,
+      exportBackgroundColor: Colors.white,
     );
 
-    final index = allNotes.indexWhere((n) => n.id == _id);
-    if (index != -1) {
-      allNotes[index] = updatedNote;
-    } else {
-      allNotes.add(updatedNote);
+    final bool? ok = await showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Vẽ/Ký tên'),
+        content: SizedBox(
+          width: 300,
+          height: 300,
+          child: Signature(controller: controller, backgroundColor: Colors.grey[200]!),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Hủy')),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Lưu')),
+        ],
+      ),
+    );
+
+    if (ok == true && controller.isNotEmpty) {
+      try {
+        final Uint8List? data = await controller.toPngBytes();
+        if (data != null) {
+          String fileName = 'draw_${DateTime.now().millisecondsSinceEpoch}.png';
+          String filePath;
+          
+          if (kIsWeb) {
+            // Trên web, lưu vào memory và hiển thị dưới dạng base64
+            filePath = 'data:image/png;base64,${base64Encode(data)}';
+            print('✅ Bản vẽ đã lưu (web): base64 encoded');
+          } else {
+            // Trên mobile/desktop, lưu vào file system
+            final dir = await getApplicationDocumentsDirectory();
+            filePath = '${dir.path}/$fileName';
+            final file = File(filePath);
+            await file.writeAsBytes(data);
+            print('✅ Bản vẽ đã lưu (local): $filePath');
+          }
+          
+          setState(() => _files.add(filePath));
+        }
+      } catch (e) {
+        print('❌ Lỗi lưu bản vẽ: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lỗi lưu bản vẽ: $e')),
+        );
+      }
+    }
+  }
+
+  Future<bool> _save({required bool popAfterSave}) async {
+    if (_loading) return false;
+
+    final title = _t.text.trim();
+    final content = _c.text.trim();
+    if (title.isEmpty && content.isEmpty && _files.isEmpty && widget.note == null) {
+      if (popAfterSave) {
+        Navigator.pop(context);
+      }
+      return true;
     }
 
-    final String encoded = jsonEncode(allNotes.map((n) => n.toJson()).toList());
-    await prefs.setString('notes', encoded);
+    setState(() => _loading = true);
 
-    if (mounted) {
-      Navigator.pop(context);
+    bool ok = false;
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw Exception('Chưa đăng nhập');
+      }
+
+      print('📝 Đang lưu ghi chú với ${_files.length} attachments');
+      for (int i = 0; i < _files.length; i++) {
+        print('  📎 Attachment $i: ${_files[i]}');
+        if (_files[i].startsWith('data:')) {
+          print('  📎 Type: Base64/Web');
+        } else {
+          final file = File(_files[i]);
+          print('  📎 File tồn tại: ${file.exists()}');
+        }
+      }
+
+      final updatedNote = Note(
+        id: _id,
+        title: title,
+        content: content,
+        modifiedTime: DateTime.now(),
+        colorIndex: _color,
+        userId: FirebaseAuth.instance.currentUser?.uid,
+        attachments: List.from(_files), // Tạo bản sao để tránh reference issues
+      );
+
+      // 1) Luôn update local cache trước để back không bị mất dữ liệu
+      final prefs = await SharedPreferences.getInstance();
+
+      List<String> notesJson;
+      try {
+        notesJson = prefs.getStringList(_HomeScreenState._prefsNotesKey) ?? <String>[];
+      } catch (e) {
+        final dynamic raw = prefs.get(_HomeScreenState._prefsNotesKey);
+        print('⚠️ Dữ liệu notes bị sai kiểu (trước khi lưu): ${raw.runtimeType} - $raw');
+        await prefs.remove(_HomeScreenState._prefsNotesKey);
+        notesJson = <String>[];
+      }
+
+      final notes = notesJson.map((e) => Note.fromJson(jsonDecode(e))).toList();
+
+      final existingIndex = notes.indexWhere((n) => n.id == _id);
+      if (existingIndex >= 0) {
+        notes[existingIndex] = updatedNote;
+      } else {
+        notes.add(updatedNote);
+      }
+
+      notes.sort((a, b) => b.modifiedTime.compareTo(a.modifiedTime));
+      await prefs.setStringList(
+        _HomeScreenState._prefsNotesKey,
+        notes.map((n) => jsonEncode(n.toJson())).toList(),
+      );
+
+      // 2) Sau đó ghi Firestore (source of truth)
+      Future<void> doWrite() {
+        return FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .collection('notes')
+            .doc(_id)
+            .set(updatedNote.toFirestore(), SetOptions(merge: true));
+      }
+
+      try {
+        await doWrite().timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        await doWrite().timeout(const Duration(seconds: 20));
+      }
+
+      print('✅ Ghi chú đã lưu lên Firestore (và cache local) thành công!');
+      
+      if (mounted && popAfterSave) Navigator.pop(context);
+      ok = true;
+    } on FirebaseException catch (e) {
+      print('❌ Lỗi lưu FirebaseException: ${e.code} - ${e.message}');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Lỗi lưu Firestore: ${e.code}')),
+      );
+      ok = false;
+    } catch (e) {
+      print('❌ Lỗi lưu: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Lỗi lưu: $e')),
+      );
+      ok = false;
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
+
+    return ok;
   }
 
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
       onWillPop: () async {
-        await _saveAndExit();
-        return false;
+        final ok = await _save(popAfterSave: false);
+        return ok;
       },
       child: Scaffold(
-        backgroundColor: noteColors[_selectedColorIndex],
+        backgroundColor: noteColors[_color],
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           elevation: 0,
           leading: IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new, color: Colors.black87),
-            onPressed: _saveAndExit,
+            icon: const Icon(Icons.arrow_back, color: Colors.black87),
+            onPressed: () async {
+              final ok = await _save(popAfterSave: true);
+              if (!ok) return;
+            },
           ),
           actions: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8.0),
-              child: IconButton(
-                icon: const Icon(Icons.palette_outlined, color: Colors.black87),
-                onPressed: _showColorPicker,
+            IconButton(
+              icon: const Icon(Icons.palette, color: Colors.black87),
+              onPressed: () => showModalBottomSheet(
+                context: context,
+                builder: (c) => Container(
+                  padding: const EdgeInsets.all(20),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: List.generate(
+                      noteColors.length,
+                      (i) => GestureDetector(
+                        onTap: () {
+                          setState(() => _color = i);
+                          Navigator.pop(context);
+                        },
+                        child: CircleAvatar(
+                          backgroundColor: noteColors[i],
+                          radius: 20,
+                          child: _color == i ? const Icon(Icons.check, size: 16) : null,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ],
         ),
         body: Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
-              child: TextField(
-                controller: _titleController,
-                style: const TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black87,
-                ),
-                decoration: const InputDecoration(
-                  hintText: 'Tiêu đề',
-                  hintStyle: TextStyle(color: Colors.black26),
-                  border: InputBorder.none,
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Row(
-                children: [
-                  Text(
-                    DateFormat('dd MMMM yyyy, HH:mm').format(DateTime.now()),
-                    style: TextStyle(color: Colors.grey[500], fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
             Expanded(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: TextField(
-                  controller: _contentController,
-                  maxLines: null,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    height: 1.6,
-                    color: Colors.black87,
-                  ),
-                  decoration: const InputDecoration(
-                    hintText: 'Bắt đầu viết điều gì đó...',
-                    hintStyle: TextStyle(color: Colors.black26),
-                    border: InputBorder.none,
-                  ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: _t,
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                      decoration: const InputDecoration(
+                        hintText: 'Tiêu đề',
+                        border: InputBorder.none,
+                      ),
+                    ),
+                    TextField(
+                      controller: _c,
+                      maxLines: null,
+                      decoration: const InputDecoration(
+                        hintText: 'Nội dung...',
+                        border: InputBorder.none,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    _buildAttachmentsList(),
+                  ],
                 ),
               ),
             ),
+            _buildBottomToolbar(),
           ],
         ),
       ),
     );
   }
 
-  void _showColorPicker() {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+  Widget _buildAttachmentsList() {
+    if (_files.isEmpty) return const SizedBox.shrink();
+    
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 8,
+        mainAxisSpacing: 8,
       ),
-      builder: (context) {
-        return Container(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Chọn màu sắc cho ghi chú',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 20),
-              SizedBox(
-                height: 60,
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: noteColors.length,
-                  itemBuilder: (context, index) {
-                    return GestureDetector(
-                      onTap: () {
-                        setState(() {
-                          _selectedColorIndex = index;
-                        });
-                        Navigator.pop(context);
-                      },
-                      child: Container(
-                        width: 50,
-                        height: 50,
-                        margin: const EdgeInsets.only(right: 15),
-                        decoration: BoxDecoration(
-                          color: noteColors[index],
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: _selectedColorIndex == index
-                                ? const Color(0xFF673AB7)
-                                : Colors.black12,
-                            width: 3,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.1),
-                              blurRadius: 5,
-                            )
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
+      itemCount: _files.length,
+      itemBuilder: (c, i) => Stack(
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.black12),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: _buildAttachmentWidget(_files[i]),
+            ),
           ),
-        );
-      },
+          Positioned(
+            right: 0,
+            child: GestureDetector(
+              onTap: () => setState(() => _files.removeAt(i)),
+              child: const Icon(Icons.cancel, color: Colors.red, size: 20),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAttachmentWidget(String path) {
+    // Kiểm tra nếu là base64 image (web)
+    if (path.startsWith('data:image/')) {
+      return Image.network(
+        path,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: double.infinity,
+        errorBuilder: (context, error, stackTrace) {
+          print('❌ Lỗi hiển thị base64 image: $error');
+          return const Center(child: Icon(Icons.broken_image, color: Colors.grey));
+        },
+      );
+    }
+    // Kiểm tra nếu là base64 file khác (web)
+    else if (path.startsWith('data:application/')) {
+      return const Center(child: Icon(Icons.insert_drive_file, size: 30));
+    }
+    // Kiểm tra nếu là file ảnh local
+    else if (path.endsWith('.png') || path.endsWith('.jpg') || path.endsWith('.jpeg')) {
+      return Image.file(
+        File(path),
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: double.infinity,
+        errorBuilder: (context, error, stackTrace) {
+          print('❌ Lỗi hiển thị ảnh local: $error');
+          return const Center(child: Icon(Icons.broken_image, color: Colors.grey));
+        },
+      );
+    }
+    // File khác
+    return const Center(child: Icon(Icons.insert_drive_file, size: 30));
+  }
+
+  Widget _buildBottomToolbar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      color: Colors.white,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          IconButton(icon: const Icon(Icons.image), onPressed: _pickImg),
+          IconButton(icon: const Icon(Icons.attach_file), onPressed: _pickFile),
+          IconButton(icon: const Icon(Icons.draw), onPressed: _draw),
+        ],
+      ),
     );
   }
 }

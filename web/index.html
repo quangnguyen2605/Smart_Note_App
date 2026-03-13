@@ -31,6 +31,37 @@
 
   <title>buoi7</title>
   <link rel="manifest" href="manifest.json">
+  
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
+  
+  <!-- Firebase Config - Project ptud-42561 -->
+  <script>
+    // Firebase configuration
+    const firebaseConfig = {
+      apiKey: "AIzaSyD3aUAHCLA71s69sjw3FyZdSyJQ5Q1lQYg",
+      authDomain: "ptud-42561.firebaseapp.com",
+      projectId: "ptud-42561",
+      storageBucket: "ptud-42561.firebasestorage.app",
+      messagingSenderId: "346353106055",
+      appId: "1:346353106055:web:4079ae21b3f4badbbe0c22",
+      measurementId: "G-YEX4V9FWHK"
+    };
+    
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+    console.log('✅ Firebase initialized successfully');
+    
+    // Check if Firebase is ready
+    firebase.auth().onAuthStateChanged((user) => {
+      console.log('🔥 Firebase Auth state changed:', user ? user.email : 'No user');
+    });
+  </script>
+  
+  <!-- Google Sign-In -->
+  <meta name="google-signin-client_id" content="346353106055-9gfidtupf2maibo7um7gil37rug1pitu.apps.googleusercontent.com">
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>

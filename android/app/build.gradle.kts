@@ -2,12 +2,12 @@ plugins {
     id("com.android.application")
     id("kotlin-android")
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
 }
 
 android {
     namespace = "com.example.buoi7"
-    // Cập nhật compileSdk lên 36 theo yêu cầu của các plugin mới
-    compileSdk = 36
+    compileSdk = 35
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -21,9 +21,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.buoi7"
-        // Sử dụng giá trị cố định thay vì provider bị lỗi
-        minSdk = flutter.minSdkVersion 
-        targetSdk = 36
+        minSdk = flutter.minSdkVersion
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
