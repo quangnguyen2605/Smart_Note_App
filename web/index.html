@@ -39,20 +39,21 @@
   
   <!-- Firebase Config - Project ptud-42561 -->
   <script>
-    // Firebase configuration
+    // Firebase configuration - ptud-42561
     const firebaseConfig = {
-      apiKey: "AIzaSyD3aUAHCLA71s69sjw3FyZdSyJQ5Q1lQYg",
+      apiKey: "AIzaSyC9Y9vAi9dqiWEJlQjnNzcSVuNHB5kOuq4",
       authDomain: "ptud-42561.firebaseapp.com",
       projectId: "ptud-42561",
       storageBucket: "ptud-42561.firebasestorage.app",
       messagingSenderId: "346353106055",
-      appId: "1:346353106055:web:4079ae21b3f4badbbe0c22",
-      measurementId: "G-YEX4V9FWHK"
+      appId: "1:346353106055:android:16eecaf59ce86020be0c22"
     };
     
-    // Initialize Firebase
-    firebase.initializeApp(firebaseConfig);
-    console.log('✅ Firebase initialized successfully');
+    // Initialize Firebase (only if not already initialized)
+    if (!firebase.apps || !firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+      console.log('✅ Firebase initialized successfully - Project: ptud-42561');
+    }
     
     // Check if Firebase is ready
     firebase.auth().onAuthStateChanged((user) => {
@@ -60,8 +61,8 @@
     });
   </script>
   
-  <!-- Google Sign-In -->
-  <meta name="google-signin-client_id" content="346353106055-9gfidtupf2maibo7um7gil37rug1pitu.apps.googleusercontent.com">
+  <!-- Google Sign-In Client ID (from ptud-42561 project) -->
+  <meta name="google-signin-client_id" content="346353106055-REPLACE_WITH_YOUR_WEB_CLIENT_ID.apps.googleusercontent.com">
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>

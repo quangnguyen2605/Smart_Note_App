@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "77075363470",
+    "project_id": "smartnote-5e422",
+    "storage_bucket": "smartnote-5e422.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:77075363470:android:6005c0f1d392266f193bdf",
+        "android_client_info": {
+          "package_name": "com.example.buoi7"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "77075363470-fsoocvl28ds1a4jg75co38ceqvg25phh.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.buoi7",
+            "certificate_hash": "095b71ee4a7c247108fc2053b97c75a66885d97f"
+          }
+        },
+        {
+          "client_id": "77075363470-d4qi8fqfdk77ab7893q89bn7069ess1r.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDu7N5zHfENTBJhQtE9A-P3yPmQYPm3BN4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "77075363470-d4qi8fqfdk77ab7893q89bn7069ess1r.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "77075363470-luqotvul8d27v2mm9lku2o2nseu7jvdi.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.buoi7"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

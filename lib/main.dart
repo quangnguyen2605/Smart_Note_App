@@ -16,6 +16,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,19 +24,22 @@ void main() async {
   // Khởi tạo Firebase cho cả web và mobile
   bool firebaseReady = false;
   try {
-    // Khởi tạo Firebase với options
-    await Firebase.initializeApp(
-      options: const FirebaseOptions(
-        apiKey: "AIzaSyD3aUAHCLA71s69sjw3FyZdSyJQ5Q1lQYg",
-        authDomain: "ptud-42561.firebaseapp.com",
-        projectId: "ptud-42561",
-        storageBucket: "ptud-42561.firebasestorage.app",
-        messagingSenderId: "346353106055",
-        appId: "1:346353106055:web:4079ae21b3f4badbbe0c22",
-      ),
-    );
+    // Kiểm tra xem Firebase đã được khởi tạo chưa
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp(
+        options: FirebaseOptions(
+          apiKey: "AIzaSyDu7N5zHfENTBJhQtE9A-P3yPmQYPm3BN4",
+          appId: kIsWeb 
+              ? "1:77075363470:web:2b08197bd484809c193bdf" 
+              : "1:77075363470:android:6005c0f1d392266f193bdf",
+          messagingSenderId: "77075363470",
+          projectId: "smartnote-5e422",
+          storageBucket: "smartnote-5e422.firebasestorage.app",
+        ),
+      );
+    }
     firebaseReady = true;
-    print('✅ Firebase kết nối thành công!');
+    print('✅ Firebase kết nối thành công! Project: smartnote-5e422');
   } catch (e) {
     print('❌ Lỗi Firebase: $e');
     firebaseReady = false;
@@ -229,71 +233,131 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      // Chỉ cho phép Google Sign-In trên web
-      if (!kIsWeb) {
-        setState(() {
-          _error = 'Google Sign-In chỉ khả dụng trên web';
-          _loading = false;
-        });
-        return;
-      }
+      print('🔍 Bắt đầu Google Sign-In...');
+      print('🌐 Nền tảng: ${kIsWeb ? "Web" : "Mobile"}');
 
       // Kiểm tra Firebase đã được khởi tạo chưa
-      try {
-        FirebaseAuth.instance.app;
-        print('✅ Firebase đã sẵn sàng');
-      } catch (e) {
-        print('❌ Firebase chưa được khởi tạo: $e');
+      if (Firebase.apps.isEmpty) {
+        print('❌ Firebase chưa được khởi tạo');
         setState(() {
           _error = 'Firebase chưa được khởi tạo. Vui lòng refresh trang!';
           _loading = false;
         });
         return;
       }
+      print('✅ Firebase đã sẵn sàng: ${Firebase.apps.first.name}');
 
-      print('🔍 Bắt đầu Google Sign-In với Firebase Auth...');
-      
-      // Dùng Firebase Auth trực tiếp với popup
-      final GoogleAuthProvider googleProvider = GoogleAuthProvider();
-      googleProvider.addScope('email');
-      
-      final UserCredential userCredential = await FirebaseAuth.instance.signInWithPopup(googleProvider);
-      final User? user = userCredential.user;
+      if (kIsWeb) {
+        // Web: dùng signInWithPopup
+        print('🔍 Dùng Google Sign-In Popup (Web)...');
+        final GoogleAuthProvider googleProvider = GoogleAuthProvider();
+        googleProvider.addScope('email');
+        googleProvider.addScope('profile');
+        
+        final UserCredential userCredential = 
+            await FirebaseAuth.instance.signInWithPopup(googleProvider);
+        final User? user = userCredential.user;
 
-      if (user != null) {
-        // Lưu email lần cuối để tự điền
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('lastUsername', user.email ?? user.displayName ?? 'Google User');
+        if (user != null) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('lastUsername', user.email ?? user.displayName ?? 'Google User');
+          print('✅ Đăng nhập Google thành công (Web): ${user.email}');
+          if (mounted) {
+            Navigator.popUntil(context, (route) => route.isFirst);
+          }
+        }
+      } else {
+        // Mobile: dùng google_sign_in package
+        print('📱 Dùng Google Sign-In cho Mobile...');
+        final GoogleSignIn googleSignIn = GoogleSignIn();
         
-        print('✅ Đăng nhập Google thành công: ${user.email}');
+        // Buộc người dùng chọn tài khoản (tránh kẹt tài khoản cũ nếu có lỗi)
+        await googleSignIn.signOut();
         
-        if (mounted) {
-          Navigator.popUntil(context, (route) => route.isFirst);
+        final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
+        
+        if (googleUser == null) {
+          // Người dùng hủy đăng nhập
+          setState(() {
+            _error = 'Đã hủy đăng nhập Google.';
+            _loading = false;
+          });
+          return;
+        }
+
+        final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+        final AuthCredential credential = GoogleAuthProvider.credential(
+          accessToken: googleAuth.accessToken,
+          idToken: googleAuth.idToken,
+        );
+
+        final UserCredential userCredential = 
+            await FirebaseAuth.instance.signInWithCredential(credential);
+        final User? user = userCredential.user;
+
+        if (user != null) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('lastUsername', user.email ?? user.displayName ?? 'Google User');
+          print('✅ Đăng nhập Google thành công (Mobile): ${user.email}');
+          if (mounted) {
+            Navigator.popUntil(context, (route) => route.isFirst);
+          }
         }
       }
+    } on FirebaseAuthException catch (e) {
+      print('❌ FirebaseAuthException: ${e.code} - ${e.message}');
+      String errorMessage;
+      switch (e.code) {
+        case 'popup-closed-by-user':
+          errorMessage = 'Bạn đã đóng popup đăng nhập Google.';
+          break;
+        case 'popup-blocked':
+          errorMessage = 'Popup bị chặn! Vui lòng cho phép popup trong trình duyệt.';
+          break;
+        case 'cancelled-popup-request':
+          errorMessage = 'Yêu cầu đăng nhập bị hủy. Thử lại!';
+          break;
+        case 'network-request-failed':
+          errorMessage = 'Lỗi kết nối mạng. Kiểm tra internet!';
+          break;
+        case 'invalid-api-key':
+          errorMessage = 'API key Firebase không hợp lệ. Liên hệ admin!';
+          break;
+        case 'operation-not-allowed':
+          errorMessage = 'Google Sign-In chưa được bật trong Firebase Console!';
+          break;
+        case 'unauthorized-domain':
+          errorMessage = 'Domain này chưa được thêm vào Firebase Auth. Thêm localhost vào Authorized domains!';
+          break;
+        default:
+          errorMessage = 'Lỗi Firebase: ${e.message ?? e.code}';
+      }
+      setState(() {
+        _error = errorMessage;
+        _loading = false;
+      });
     } catch (e) {
       print('❌ Lỗi Google Sign-In: $e');
-      String errorMessage = 'Lỗi đăng nhập Google';
+      String errorMessage = 'Lỗi đăng nhập Google: ${e.toString()}';
       
-      // Xử lý các lỗi phổ biến
       if (e.toString().contains('invalid_client') || e.toString().contains('401')) {
-        errorMessage = 'Google OAuth Client ID không hợp lệ. Kiểm tra Firebase Console!';
-      } else if (e.toString().contains('redirect_uri_mismatch') || e.toString().contains('400')) {
-        errorMessage = 'Redirect URI không khớp. Chạy với port 8080!';
+        errorMessage = 'OAuth Client ID không hợp lệ. Vui lòng kiểm tra Firebase Console!';
+      } else if (e.toString().contains('redirect_uri_mismatch')) {
+        errorMessage = 'Lỗi redirect URI. Vui lòng thêm localhost vào Authorized domains trong Firebase!';
       } else if (e.toString().contains('access_denied')) {
         errorMessage = 'Bạn đã từ chối quyền truy cập Google.';
-      } else if (e.toString().contains('network')) {
-        errorMessage = 'Lỗi kết nối mạng. Vui lòng thử lại!';
       } else if (e.toString().contains('popup-closed-by-user')) {
         errorMessage = 'Bạn đã đóng popup đăng nhập.';
-      } else if (e.toString().contains('no-app')) {
-        errorMessage = 'Firebase chưa được khởi tạo. Vui lòng refresh trang!';
       }
       
       setState(() {
         _error = errorMessage;
         _loading = false;
       });
+    } finally {
+      if (mounted && _loading) {
+        setState(() => _loading = false);
+      }
     }
   }
 
